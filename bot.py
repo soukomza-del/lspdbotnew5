@@ -3058,23 +3058,27 @@ class FTDSzkoleniaSelect(nextcord.ui.Select):
                 )
                 return
 
-            # Pobierz szkoleniowców z bazy — osoby z ftd=True
-            officers = await fetch_officers()
-            nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
+            # Pobierz dane FTD z bazy
+            record = await fetch_full_record()
+            ftd_data = record.get("ftd", {})
+            fto_list = ftd_data.get("fto", [])
+            main_trainers = ftd_data.get("mainTrainers", {})
+
+            nick_to_member    = {m.name.lower(): m for m in guild.members if not m.bot}
             display_to_member = {m.display_name.lower(): m for m in guild.members if not m.bot}
 
-            # Szkoleniowcy FTD to oficerowie z ftd=True którzy mają dane szkolenie (training_key=True)
-            trainers = [
-                o for o in officers
-                if o.get("ftd") and o.get(training_key)
-            ]
+            # Klucz szkolenia w FTD_TRAININGS_ALL to np. "nt", "sv" — w bazie fto pole też lowercase
+            training_key_upper = training_key.upper()
 
+            # Pinguj wszystkich uprawnionych FTO dla danego szkolenia
+            qualified = [o for o in fto_list if o.get(training_key_upper) or o.get(training_key)]
             trainer_members = []
-            for t in trainers:
-                nick = (t.get("nick") or "").strip().lower()
+            for fto in qualified:
+                nick = (fto.get("nick") or "").strip().lower()
                 m = nick_to_member.get(nick) or display_to_member.get(nick)
                 if m:
                     trainer_members.append(m)
+            log.info(f"[FTD TICKET] Ping {len(trainer_members)} szkoleniowców dla {training_key}")
 
             # Uprawnienia ticketu
             ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
@@ -3157,9 +3161,9 @@ async def ftd_panel(interaction: nextcord.Interaction):
         await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
         return
 
-    channel = interaction.guild.get_channel(SZKOLENIA_CHANNEL_ID)
+    channel = interaction.guild.get_channel(1493138283293577396)
     if not channel:
-        await interaction.response.send_message(f"❌ Kanał {SZKOLENIA_CHANNEL_ID} nie znaleziony.", ephemeral=True)
+        await interaction.response.send_message("❌ Kanał szkoleń FTD nie znaleziony.", ephemeral=True)
         return
 
     embed = nextcord.Embed(
