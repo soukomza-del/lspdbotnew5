@@ -2732,6 +2732,16 @@ class SzkoleniaSelectView(nextcord.ui.View):
         super().__init__(timeout=None)
         self.add_item(SzkoleniSelect())
 
+    async def on_error(self, error: Exception, item, interaction: nextcord.Interaction) -> None:
+        log.error(f"[SZKOLENIA SELECT ERROR] {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Błąd: {error}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Błąd: {error}", ephemeral=True)
+        except Exception:
+            pass
+
 class SzkoleniSelect(nextcord.ui.Select):
     def __init__(self):
         options = [
@@ -2747,10 +2757,20 @@ class SzkoleniSelect(nextcord.ui.Select):
         )
 
     async def callback(self, interaction: nextcord.Interaction):
-        training_key  = self.values[0]
-        training_name = next((n for n, k in FTD_TRAININGS if k == training_key), training_key.upper())
-        modal = SzkoleniaFormModal(training_name, training_key)
-        await interaction.response.send_modal(modal)
+        try:
+            training_key  = self.values[0]
+            training_name = next((n for n, k in FTD_TRAININGS if k == training_key), training_key.upper())
+            modal = SzkoleniaFormModal(training_name, training_key)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            log.error(f"[SZKOLENIA SELECT] Błąd przy otwieraniu formularza: {e}", exc_info=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"❌ Błąd: {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"❌ Błąd: {e}", ephemeral=True)
+            except Exception:
+                pass
 
 
 class SzkoleniaFormModal(nextcord.ui.Modal):
@@ -2778,7 +2798,16 @@ class SzkoleniaFormModal(nextcord.ui.Modal):
 
     async def callback(self, interaction: nextcord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        try:
+            await self._handle(interaction)
+        except Exception as e:
+            log.error(f"[SZKOLENIA MODAL] Błąd: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(f"❌ Błąd: {e}", ephemeral=True)
+            except Exception:
+                pass
 
+    async def _handle(self, interaction: nextcord.Interaction):
         zdajacy_name       = self.zdajacy.value.strip()
         szkoleniowiec_name = self.szkoleniowiec.value.strip()
         guild              = interaction.guild
