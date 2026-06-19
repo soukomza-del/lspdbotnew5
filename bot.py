@@ -2726,6 +2726,19 @@ FTD_TRAININGS = [
     ("ASU", "asu"),
 ]
 
+# Rozszerzona lista szkoleń z podziałem obowiązkowe/nieobowiązkowe
+# (name, key, obowiazkowe)
+FTD_TRAININGS_ALL = [
+    ("NT — Negocjator",              "nt",   True),
+    ("FAC — Pierwsza Pomoc",         "fac",  True),
+    ("SV — Supervisor",              "sv",   True),
+    ("PWC — Patrol Watch Commander", "pwc",  True),
+    ("ASU — Air Support Unit",       "asu",  False),
+    ("SEU — Speed Enforcement Unit", "seu",  False),
+    ("WU — Water Unit",              "wu",   False),
+    ("Mary",                         "mary", False),
+]
+
 class SzkoleniaSelectView(nextcord.ui.View):
     """Stała wiadomość z menu wyboru szkolenia — persist po restarcie."""
     def __init__(self):
@@ -3007,6 +3020,168 @@ class SzkoleniaDecisionView(nextcord.ui.View):
         log.info(f"[SZKOLENIA] {self.zdajacy_name} NIE zaliczył {self.training_name} — potwierdził {self.szkoleniowiec_name}")
 
 
+# ─── PANEL SZKOLEŃ FTD — TICKET ──────────────────────────────────────────────
+
+class FTDSzkoleniaSelect(nextcord.ui.Select):
+    """Dropdown z listą szkoleń FTD — tworzy ticket i pinguje szkoleniowców."""
+    def __init__(self):
+        obowiazkowe = [
+            nextcord.SelectOption(label=name, value=key, emoji="✅")
+            for name, key, obow in FTD_TRAININGS_ALL if obow
+        ]
+        nieobowiazkowe = [
+            nextcord.SelectOption(label=name, value=key, emoji="🔵")
+            for name, key, obow in FTD_TRAININGS_ALL if not obow
+        ]
+        super().__init__(
+            placeholder="🎓 Wybierz szkolenie...",
+            min_values=1,
+            max_values=1,
+            options=obowiazkowe + nieobowiazkowe,
+            custom_id="ftd_szkolenia_ticket_select",
+        )
+
+    async def callback(self, interaction: nextcord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            training_key  = self.values[0]
+            training_name = next((n for n, k, _ in FTD_TRAININGS_ALL if k == training_key), training_key.upper())
+            guild         = interaction.guild
+            user          = interaction.user
+
+            # Sprawdź czy ticket już istnieje
+            channel_name = f"szkolenie-{training_key}-{user.id}"
+            existing = nextcord.utils.get(guild.text_channels, name=channel_name)
+            if existing:
+                await interaction.followup.send(
+                    f"❌ Masz już otwarty ticket dla tego szkolenia: {existing.mention}", ephemeral=True
+                )
+                return
+
+            # Pobierz szkoleniowców z bazy — osoby z ftd=True
+            officers = await fetch_officers()
+            nick_to_member = {m.name.lower(): m for m in guild.members if not m.bot}
+            display_to_member = {m.display_name.lower(): m for m in guild.members if not m.bot}
+
+            # Szkoleniowcy FTD to oficerowie z ftd=True którzy mają dane szkolenie (training_key=True)
+            trainers = [
+                o for o in officers
+                if o.get("ftd") and o.get(training_key)
+            ]
+
+            trainer_members = []
+            for t in trainers:
+                nick = (t.get("nick") or "").strip().lower()
+                m = nick_to_member.get(nick) or display_to_member.get(nick)
+                if m:
+                    trainer_members.append(m)
+
+            # Uprawnienia ticketu
+            ticket_ch = guild.get_channel(TICKET_CHANNEL_ID)
+            category  = ticket_ch.category if ticket_ch else None
+
+            overwrites = {
+                guild.default_role: nextcord.PermissionOverwrite(read_messages=False),
+                user:               nextcord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me:           nextcord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            }
+            for tm in trainer_members:
+                overwrites[tm] = nextcord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+            ticket_channel = await guild.create_text_channel(
+                name=channel_name,
+                overwrites=overwrites,
+                category=category,
+                reason=f"Ticket szkolenia FTD: {training_name} — {user}"
+            )
+
+            embed = nextcord.Embed(
+                title=f"🎓 Szkolenie: {training_name}",
+                description=(
+                    f"Witaj {user.mention}!\n\n"
+                    f"Otworzyłeś ticket w sprawie szkolenia **{training_name}**.\n\n"
+                    f"Szkoleniowiec skontaktuje się z Tobą wkrótce i ustali termin szkolenia.\n\n"
+                    f"Aby zamknąć ticket użyj przycisku poniżej."
+                ),
+                color=0x1e5fc4,
+                timestamp=datetime.utcnow()
+            )
+            embed.set_footer(text="Los Santos Police Department · FTD Ticket System")
+
+            # Ping szkoleniowców
+            if trainer_members:
+                ping_str = " ".join(m.mention for m in trainer_members)
+            else:
+                ping_str = None
+                log.warning(f"[FTD TICKET] Brak szkoleniowców dla {training_key} — brak pinga")
+
+            view = CloseTicketView()
+            await ticket_channel.send(content=ping_str, embed=embed, view=view)
+            await interaction.followup.send(f"✅ Twój ticket: {ticket_channel.mention}", ephemeral=True)
+            log.info(f"[FTD TICKET] {user} otworzył ticket szkolenia {training_name}, ping: {ping_str}")
+
+        except nextcord.Forbidden:
+            log.error(f"[FTD TICKET] Brak uprawnień — {interaction.user}")
+            try:
+                await interaction.followup.send("❌ Brak uprawnień do tworzenia kanałów.", ephemeral=True)
+            except Exception:
+                pass
+        except Exception as e:
+            log.error(f"[FTD TICKET] Błąd: {e}", exc_info=True)
+            try:
+                await interaction.followup.send(f"❌ Błąd: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+
+class FTDSzkoleniaTicketView(nextcord.ui.View):
+    """Stały panel szkoleń FTD z ticketem."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(FTDSzkoleniaSelect())
+
+    async def on_error(self, error: Exception, item, interaction: nextcord.Interaction) -> None:
+        log.error(f"[FTD TICKET ERROR] {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Błąd: {error}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Błąd: {error}", ephemeral=True)
+        except Exception:
+            pass
+
+
+@bot.slash_command(guild_ids=[GUILD_ID], name="ftd_panel", description="Wyślij panel szkoleń FTD (ticket system) na kanał")
+async def ftd_panel(interaction: nextcord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Brak uprawnień.", ephemeral=True)
+        return
+
+    channel = interaction.guild.get_channel(SZKOLENIA_CHANNEL_ID)
+    if not channel:
+        await interaction.response.send_message(f"❌ Kanał {SZKOLENIA_CHANNEL_ID} nie znaleziony.", ephemeral=True)
+        return
+
+    embed = nextcord.Embed(
+        title="🎓 SYSTEM SZKOLEŃ FTD — LSPD",
+        description=(
+            "Chcesz umówić się na szkolenie?\n\n"
+            "Wybierz szkolenie z listy poniżej, a zostanie dla Ciebie automatycznie utworzony "
+            "prywatny ticket ze szkoleniowcami uprawnionymi do jego przeprowadzenia.\n\n"
+            "**Szkolenia obowiązkowe** ✅ — wymagane do awansu\n"
+            "**Szkolenia nieobowiązkowe** 🔵 — dodatkowe uprawnienia\n\n"
+            "*Pamiętaj — otwieraj ticket tylko gdy jesteś gotowy na szkolenie.*"
+        ),
+        color=0x1e5fc4,
+        timestamp=datetime.utcnow()
+    )
+    embed.set_footer(text="Los Santos Police Department · FTD Ticket System")
+
+    view = FTDSzkoleniaTicketView()
+    await channel.send(embed=embed, view=view)
+    await interaction.response.send_message(f"✅ Panel FTD wysłany na {channel.mention}", ephemeral=True)
+
+
 # Komenda slash do wysłania panelu szkoleń na kanał
 @bot.slash_command(guild_ids=[GUILD_ID], name="szkolen_panel", description="Wyślij panel szkoleń FTD na kanał")
 async def szkolen_panel(interaction: nextcord.Interaction):
@@ -3050,6 +3225,7 @@ async def on_ready():
     bot.add_view(PodaniePanelView())
     bot.add_view(PodanieDecisionView())
     bot.add_view(SzkoleniaSelectView())
+    bot.add_view(FTDSzkoleniaTicketView())
     if not auto_sync.is_running():
         auto_sync.start()
     if not iad_akta_watch.is_running():
